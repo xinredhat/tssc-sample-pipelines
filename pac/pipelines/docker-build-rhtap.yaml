@@ -187,10 +187,10 @@ spec:
         name: acs-deploy-check
       when:
         - input: $(params.event-type)
-          operator: notin
+          operator: in
           values:
-            - pull_request
-            - Merge Request
+            - push
+            - Push
     - name: update-deployment
       params:
         - name: gitops-repo-url
