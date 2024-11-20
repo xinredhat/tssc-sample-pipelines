@@ -134,6 +134,7 @@ spec:
     script: |
       #!/usr/bin/env bash
       set -o errexit -o nounset -o pipefail
+      set -x
 
       get_from_www_auth_header() {
           local www_authenticate=$1
