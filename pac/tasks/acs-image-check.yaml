@@ -66,11 +66,12 @@ spec:
           value: $(params.image)
         - name: PARAM_IMAGE_DIGEST
           value: $(params.image-digest)
+      onError: continue
       script: |
         #!/usr/bin/env bash
         set +x
 
-        # Check if rox API enpoint is configured
+        # Check if rox API endpoint is configured
         if test -f /rox-secret/rox-api-endpoint ; then
           export ROX_CENTRAL_ENDPOINT=$(</rox-secret/rox-api-endpoint)
         else
@@ -104,7 +105,7 @@ spec:
         fi
         received_filesize=$(stat -c%s ./roxctl)
         if (( $received_filesize < 10000 )); then
-          # Responce from ACS server is not a binary but error message
+          # Response from ACS server is not a binary but error message
           cat ./roxctl
           echo 'Failed to download roxctl'
           exit 2
@@ -118,7 +119,15 @@ spec:
           echo -n "--insecure-skip-tls-verify") \
           -e "${ROX_CENTRAL_ENDPOINT}" --image "$IMAGE" --output json --force \
           > roxctl_image_check_output.json
+
+        ROXCTL_CHECK_STATUS=$?
+
         cp roxctl_image_check_output.json /steps-shared-folder/acs-image-check.json
+
+        # Exit code 3 means the error occurred during roxctl image check, but setup was successful
+        if [ "$ROXCTL_CHECK_STATUS" -ne 0 ]; then
+          exit 3
+        fi
 
     - name: report
       image: registry.access.redhat.com/ubi8-minimal@sha256:d16d4445b1567f29449fba3b6d2bc37db467dc3067d33e940477e55aecdf6e8e
@@ -127,4 +136,51 @@ spec:
           mountPath: /steps-shared-folder
       script: |
         #!/usr/bin/env bash
+        set -euo pipefail
+
         cat /steps-shared-folder/acs-image-check.json
+
+    - name: fail-if-check-failed
+      image: quay.io/konflux-ci/appstudio-utils:48c311af02858e2422d6229600e9959e496ddef1@sha256:91ddd999271f65d8ec8487b10f3dd378f81aa894e11b9af4d10639fd52bba7e8
+      volumeMounts:
+        - name: shared-folder
+          mountPath: /steps-shared-folder
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        ROX_IMAGE_CHECK_EXIT_CODE_PATH=$(steps.step-rox-image-check.exitCode.path)
+        ROX_IMAGE_CHECK_STATUS=$(cat "$ROX_IMAGE_CHECK_EXIT_CODE_PATH")
+
+        if [ "$ROX_IMAGE_CHECK_STATUS" -eq 0 ]
+        then
+          echo "No errors occurred"
+          exit
+        fi
+
+        # Fail on non-zero rox-image-check step exit code
+        # Except if the error is due to policy violations (exit code 3 && at least one severe violation)
+        if [ "$ROX_IMAGE_CHECK_STATUS" -ne 3 ]
+        then
+          echo "Error occurred during setup of roxctl"
+          exit "$ROX_IMAGE_CHECK_STATUS"
+        fi
+
+        # Number of policy violations with Critical and High severity parsed from the report
+        severe_violations=$(
+          jq '.summary |
+            with_entries(
+              select(.key | IN("CRITICAL", "HIGH"))
+            ) |
+            add' \
+            /steps-shared-folder/acs-image-check.json
+        )
+
+        # If roxctl image check exited with non-zero code and it is not because of policy violations, report error
+        if [ "$severe_violations" -eq 0 ]
+        then
+          echo "Error occurred during roxctl image check, please check the logs of rox-image-check step."
+          exit "$ROX_IMAGE_CHECK_STATUS"
+        fi
+
+        echo "No errors occurred"
