@@ -14,6 +14,8 @@ spec:
   - description: |
       Spec section of an ApplicationSnapshot resource. Not all fields of the
       resource are required. A minimal example:
+
+      ```json
         {
           "components": [
             {
@@ -21,7 +23,9 @@ spec:
             }
           ]
         }
-      Each "containerImage" in the "components" array is validated.
+      ```
+
+      Each `containerImage` in the `components` array is validated.
     name: IMAGES
     type: string
   - default: enterprise-contract-service/default
@@ -29,6 +33,8 @@ spec:
       Name of the policy configuration (EnterpriseContractPolicy
       resource) to use. `namespace/name` or `name` syntax supported. If
       namespace is omitted the namespace where the task runs is used.
+      You can also specify a policy configuration using a git url, e.g.
+      `github.com/enterprise-contract/config//slsa3`.
     name: POLICY_CONFIGURATION
     type: string
   - default: ""
@@ -55,17 +61,26 @@ spec:
       with external services. This is useful when using the integrated registry
       and a local instance of Rekor on a development cluster which may use
       certificates issued by a not-commonly trusted root CA. In such cases,
-      "/var/run/secrets/kubernetes.io/serviceaccount" is a good value. Multiple
-      paths can be provided by using the ":" separator.
+      `/var/run/secrets/kubernetes.io/serviceaccount` is a good value. Multiple
+      paths can be provided by using the `:` separator.
     name: SSL_CERT_DIR
     type: string
+  - default: trusted-ca
+    description: The name of the ConfigMap to read CA bundle data from.
+    name: CA_TRUST_CONFIGMAP_NAME
+    type: string
+  - default: ca-bundle.crt
+    description: The name of the key in the ConfigMap that contains the CA bundle
+      data.
+    name: CA_TRUST_CONFIG_MAP_KEY
+    type: string
   - default: "true"
-    description: Include rule titles and descriptions in the output. Set to "false"
+    description: Include rule titles and descriptions in the output. Set to `"false"`
       to disable it.
     name: INFO
     type: string
   - default: "true"
-    description: Fail the task if policy fails. Set to "false" to disable it.
+    description: Fail the task if policy fails. Set to `"false"` to disable it.
     name: STRICT
     type: string
   - default: /tekton/home
@@ -76,6 +91,19 @@ spec:
     description: Run policy checks with the provided time.
     name: EFFECTIVE_TIME
     type: string
+  - default: ""
+    description: Merge additional Rego variables into the policy data. Use syntax
+      "key=value,key2=value2..."
+    name: EXTRA_RULE_DATA
+    type: string
+  - default: 5m0s
+    description: Timeout setting for `ec validate`.
+    name: TIMEOUT
+    type: string
+  - default: "1"
+    description: Number of parallel workers to use for policy evaluation.
+    name: WORKERS
+    type: string
   results:
   - description: Short summary of the policy evaluation for each image
     name: TEST_OUTPUT
@@ -84,12 +112,6 @@ spec:
     - name: HOME
       value: $(params.HOMEDIR)
   steps:
-  - args:
-    - version
-    command:
-    - ec
-    image: registry.redhat.io/rhtas/ec-rhel9:0.5
-    name: version
   - env:
     - name: TUF_MIRROR
       value: $(params.TUF_MIRROR)
@@ -99,12 +121,12 @@ spec:
       set -euo pipefail
 
       if [[ -z "${TUF_MIRROR:-}" ]]; then
-          echo 'TUF_MIRROR not set. Skipping TUF root initialization.'
+          echo 'TUF_MIRROR parameter not provided. Skipping TUF root initialization.'
           exit
       fi
 
       echo 'Initializing TUF root...'
-      cosign initialize --mirror "${TUF_MIRROR}" --root "${TUF_MIRROR}/root.json"
+      ec sigstore initialize --mirror "${TUF_MIRROR}" --root "${TUF_MIRROR}/root.json"
       echo 'Done!'
   - args:
     - validate
@@ -119,16 +141,23 @@ spec:
     - --rekor-url
     - $(params.REKOR_HOST)
     - --ignore-rekor=$(params.IGNORE_REKOR)
+    - --workers
+    - $(params.WORKERS)
     - --info=$(params.INFO)
+    - --timeout=$(params.TIMEOUT)
     - --strict=false
     - --show-successes
     - --effective-time=$(params.EFFECTIVE_TIME)
+    - --extra-rule-data=$(params.EXTRA_RULE_DATA)
+    - --output
+    - text?show-successes=false
     - --output
     - yaml=$(params.HOMEDIR)/report.yaml
     - --output
     - appstudio=$(results.TEST_OUTPUT.path)
     - --output
     - json=$(params.HOMEDIR)/report-json.json
+    - --logfile=$(params.HOMEDIR)/debug.log
     command:
     - ec
     computeResources:
@@ -144,18 +173,26 @@ spec:
       value: "false"
     image: registry.redhat.io/rhtas/ec-rhel9:0.5
     name: validate
+    onError: continue
+    volumeMounts:
+    - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+      name: trusted-ca
+      readOnly: true
+      subPath: ca-bundle.crt
   - args:
     - $(params.HOMEDIR)/report.yaml
     command:
     - cat
     image: registry.redhat.io/rhtas/ec-rhel9:0.5
     name: report
+    onError: continue
   - args:
     - $(params.HOMEDIR)/report-json.json
     command:
     - cat
     image: registry.redhat.io/rhtas/ec-rhel9:0.5
     name: report-json
+    onError: continue
   - args:
     - .
     - $(results.TEST_OUTPUT.path)
@@ -163,6 +200,26 @@ spec:
     - jq
     image: registry.redhat.io/rhtas/ec-rhel9:0.5
     name: summary
+    onError: continue
+  - args:
+    - |
+      ----- DEBUG OUTPUT -----
+    command:
+    - printf
+    image: registry.redhat.io/rhtas/ec-rhel9:0.5
+    name: info
+  - args:
+    - version
+    command:
+    - ec
+    image: registry.redhat.io/rhtas/ec-rhel9:0.5
+    name: version
+  - args:
+    - $(params.HOMEDIR)/debug.log
+    command:
+    - cat
+    image: registry.redhat.io/rhtas/ec-rhel9:0.5
+    name: debug-log
   - args:
     - --argjson
     - strict
@@ -184,6 +241,14 @@ spec:
       oc annotate taskrun $(context.taskRun.name) task.results.type=ec
       oc annotate taskrun $(context.taskRun.name) task.results.container=step-report-json
       oc annotate taskrun $(context.taskRun.name) task.output.location=logs
+  volumes:
+  - configMap:
+      items:
+      - key: $(params.CA_TRUST_CONFIG_MAP_KEY)
+        path: ca-bundle.crt
+      name: $(params.CA_TRUST_CONFIGMAP_NAME)
+      optional: true
+    name: trusted-ca
   workspaces:
   - description: The workspace where the snapshot spec json file resides
     name: data
