@@ -98,6 +98,7 @@ spec:
     image: quay.io/konflux-ci/appstudio-utils:8f9f933d7b0b57e37b96fd34698c92c785cfeadc@sha256:924eb1680b6cda674e902579135a06b2c6683c3cc1082bbdc159a4ce5ea9f4df
     script: |
       #!/usr/bin/env bash
+      set -x
       set -o errexit -o nounset -o pipefail
 
       ca_bundle=/tekton-custom-certs/ca-bundle.crt
@@ -141,6 +142,7 @@ spec:
     script: |
       #!/usr/bin/env bash
       set -o errexit -o nounset -o pipefail
+      set -x
 
       ca_bundle=/tekton-custom-certs/ca-bundle.crt
       if [ -f "$ca_bundle" ]; then
