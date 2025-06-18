@@ -99,6 +99,7 @@ spec:
     script: |
       #!/usr/bin/env bash
       set -o errexit -o nounset -o pipefail
+      set -x
 
       ca_bundle=/tekton-custom-certs/ca-bundle.crt
       if [ -f "$ca_bundle" ]; then
