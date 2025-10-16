@@ -170,7 +170,7 @@ spec:
       value: $(workspaces.basic-auth.bound)
     - name: WORKSPACE_BASIC_AUTH_DIRECTORY_PATH
       value: $(workspaces.basic-auth.path)
-    image: quay.io/konflux-ci/git-clone@sha256:4e53ebd9242f05ca55bfc8d58b3363d8b9d9bc3ab439d9ab76cdbdf5b1fd42d9
+    image: quay.io/konflux-ci/git-clone@sha256:bd303d16e9d9b01622d69deff77c583ebdea36611b15dc243da658d93763e8de
     computeResources: {}
     securityContext:
       runAsUser: 0
@@ -253,7 +253,8 @@ spec:
         -sslVerify="${PARAM_SSL_VERIFY}" \
         -submodules="${PARAM_SUBMODULES}" \
         -depth="${PARAM_DEPTH}" \
-        -sparseCheckoutDirectories="${PARAM_SPARSE_CHECKOUT_DIRECTORIES}"
+        -sparseCheckoutDirectories="${PARAM_SPARSE_CHECKOUT_DIRECTORIES}" \
+        -retryMaxAttempts=10
       cd "${CHECKOUT_DIR}"
       RESULT_SHA="$(git rev-parse HEAD)"
       RESULT_SHA_SHORT="$(git rev-parse --short="${PARAM_SHORT_COMMIT_LENGTH}" HEAD)"
@@ -264,7 +265,7 @@ spec:
       if [ "${PARAM_MERGE_TARGET_BRANCH}" = "true" ]; then
         echo "Merge option enabled. Attempting to merge target branch '${PARAM_TARGET_BRANCH}' into HEAD (${RESULT_SHA})."
         echo "Fetching target branch '${PARAM_TARGET_BRANCH}'..."
-        git fetch origin "${PARAM_TARGET_BRANCH}"
+        retry git fetch origin "${PARAM_TARGET_BRANCH}"
         FETCH_EXIT_CODE="$?"
         if [ "${FETCH_EXIT_CODE}" != "0" ]; then
           echo "ERROR: Failed to fetch target branch '${PARAM_TARGET_BRANCH}'." >&2
@@ -282,16 +283,21 @@ spec:
           echo "------------------"
           exit "${MERGE_CHECK_EXIT_CODE}"
         else
-          echo "Merge successful (no conflicts found), committing..."
-          git commit -m "Merge branch '${PARAM_TARGET_BRANCH}' into ${RESULT_SHA}"
-          COMMIT_EXIT_CODE="$?"
-          if [ "${COMMIT_EXIT_CODE}" != "0" ]; then
-            echo "ERROR: Failed to commit merge." >&2
-            exit "${COMMIT_EXIT_CODE}"
+          # Check if there are changes that need to be merged, and if so, create a merge commit.
+          if git diff --staged --quiet; then
+            echo "No diff was found, skipping merge..." >&2
+          else
+            echo "Merge successful (no conflicts found), committing..."
+            git commit -m "Merge branch '${PARAM_TARGET_BRANCH}' into ${RESULT_SHA}"
+            COMMIT_EXIT_CODE="$?"
+            if [ "${COMMIT_EXIT_CODE}" != "0" ]; then
+              echo "ERROR: Failed to commit merge." >&2
+              exit "${COMMIT_EXIT_CODE}"
+            fi
+            MERGED_SHA=$(git rev-parse HEAD)
+            echo "New HEAD after merge: ${MERGED_SHA}"
+            echo "${MERGED_SHA}" > "$(results.merged_sha.path)"
           fi
-          MERGED_SHA=$(git rev-parse HEAD)
-          echo "New HEAD after merge: ${MERGED_SHA}"
-          echo "${MERGED_SHA}" > "$(results.merged_sha.path)"
         fi
       else
         echo "Merge option disabled. Using checked-out revision ${RESULT_SHA} directly."
@@ -305,14 +311,11 @@ spec:
 
       if [ "${PARAM_FETCH_TAGS}" = "true" ] ; then
         echo "Fetching tags"
-        if ! git fetch --tags; then
-          echo "Retrying fetch command..."
-          git fetch --tags
-        fi
+        retry git fetch --tags
       fi
 
   - name: symlink-check
-    image: quay.io/konflux-ci/git-clone@sha256:4e53ebd9242f05ca55bfc8d58b3363d8b9d9bc3ab439d9ab76cdbdf5b1fd42d9
+    image: quay.io/konflux-ci/git-clone@sha256:bd303d16e9d9b01622d69deff77c583ebdea36611b15dc243da658d93763e8de
     # per https://kubernetes.io/docs/concepts/containers/images/#imagepullpolicy-defaulting
     # the cluster will set imagePullPolicy to IfNotPresent
     env:
